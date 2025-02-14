@@ -541,35 +541,50 @@ class CircuitApp:
             
             symbol_data = self.symbols[self.current_component]
             
-            # Generate automatic name
-            component_number = self.get_next_component_number(self.current_component)
-            auto_name = f"{self.current_component}{component_number}"
-            
             for cmd, *args in symbol_data:
                 try:
-                    if cmd == 'wire':
-                        x1, y1, x2, y2, layer = args
-                        line = symbol.draw_wire(
-                            x1 + x/symbol.scale,
-                            y1 - y/symbol.scale,  # Invert y coordinate
-                            x2 + x/symbol.scale,
-                            y2 - y/symbol.scale,  # Invert y coordinate
-                            layer
-                        )
-                        self.temp_component.append(line)
-                    elif cmd == 'text':
+                    # Skip SPICEMODEL and SPICEEXTRA
+                    if cmd == 'text':
                         tx, ty, size, content, layer = args
-                        # Replace >NAME with auto_name and keep >VALUE as placeholder
-                        if content == '>NAME':
-                            content = auto_name
+                        if content in ['>SPICEMODEL', '>SPICEEXTRA']:
+                            continue
+                        # Keep >NAME and >VALUE as is for preview
                         text = symbol.draw_text(
                             tx + x/symbol.scale,
-                            ty - y/symbol.scale,  # Invert y coordinate
+                            ty - y/symbol.scale,
                             content,
                             size,
                             layer
                         )
                         self.temp_component.append(text)
+                    elif cmd == 'wire':
+                        x1, y1, x2, y2, layer = args
+                        line = symbol.draw_wire(
+                            x1 + x/symbol.scale,
+                            y1 - y/symbol.scale,
+                            x2 + x/symbol.scale,
+                            y2 - y/symbol.scale,
+                            layer
+                        )
+                        self.temp_component.append(line)
+                    elif cmd == 'circle':
+                        cx, cy, radius, layer = args
+                        symbol.draw_circle(
+                            cx + x/symbol.scale,
+                            cy + y/symbol.scale,
+                            radius,
+                            layer
+                        )
+                    elif cmd == 'arc':
+                        x1, y1, x2, y2, curve, layer = args
+                        symbol.draw_arc(
+                            x1 + x/symbol.scale,
+                            y1 + y/symbol.scale,
+                            abs(x2-x1)/2,  # radius
+                            0,  # start angle
+                            curve,  # end angle
+                            layer
+                        )
                     elif cmd == 'pin':
                         px, py, length, direction, name, layer = args
                         pins = symbol.draw_pin(
@@ -641,17 +656,37 @@ class CircuitApp:
     def add_component(self, x, y):
         self.logger.info(f"Adding component {self.current_component} at ({x}, {y})")
         symbol = EagleSymbol(self.canvas)
+        
         if self.current_component in self.symbols:
+            # Generate automatic name when placing component
+            component_number = self.get_next_component_number(self.current_component)
+            auto_name = f"{self.current_component}{component_number}"
+            
             symbol_data = self.symbols[self.current_component]
             for cmd, *args in symbol_data:
                 try:
-                    if cmd == 'wire':
+                    if cmd == 'text':
+                        tx, ty, size, content, layer = args
+                        # Skip SPICEMODEL and SPICEEXTRA
+                        if content in ['>SPICEMODEL', '>SPICEEXTRA']:
+                            continue
+                        # Replace >NAME with auto_name when placing
+                        if content == '>NAME':
+                            content = auto_name
+                        symbol.draw_text(
+                            tx + x/symbol.scale,
+                            ty - y/symbol.scale,
+                            content,
+                            size,
+                            layer
+                        )
+                    elif cmd == 'wire':
                         x1, y1, x2, y2, layer = args
                         symbol.draw_wire(
-                            x1 + x/symbol.scale, 
-                            y1 + y/symbol.scale,
-                            x2 + x/symbol.scale, 
-                            y2 + y/symbol.scale,
+                            x1 + x/symbol.scale,
+                            y1 - y/symbol.scale,
+                            x2 + x/symbol.scale,
+                            y2 - y/symbol.scale,
                             layer
                         )
                     elif cmd == 'circle':
@@ -672,20 +707,11 @@ class CircuitApp:
                             curve,  # end angle
                             layer
                         )
-                    elif cmd == 'text':
-                        tx, ty, size, content, layer = args
-                        symbol.draw_text(
-                            tx + x/symbol.scale,
-                            ty + y/symbol.scale,
-                            content,
-                            size,
-                            layer
-                        )
                     elif cmd == 'pin':
                         px, py, length, direction, name, layer = args
                         symbol.draw_pin(
                             px + x/symbol.scale,
-                            py + y/symbol.scale,
+                            py - y/symbol.scale,  # Invert y coordinate
                             length,
                             direction,
                             name,
