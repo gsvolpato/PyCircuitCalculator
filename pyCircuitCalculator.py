@@ -550,10 +550,10 @@ class CircuitApp:
                     if cmd == 'wire':
                         x1, y1, x2, y2, layer = args
                         line = symbol.draw_wire(
-                            x1 + x/symbol.scale, 
-                            y1 + y/symbol.scale,
-                            x2 + x/symbol.scale, 
-                            y2 + y/symbol.scale,
+                            x1 + x/symbol.scale,
+                            y1 - y/symbol.scale,  # Invert y coordinate
+                            x2 + x/symbol.scale,
+                            y2 - y/symbol.scale,  # Invert y coordinate
                             layer
                         )
                         self.temp_component.append(line)
@@ -564,12 +564,23 @@ class CircuitApp:
                             content = auto_name
                         text = symbol.draw_text(
                             tx + x/symbol.scale,
-                            ty + y/symbol.scale,
+                            ty - y/symbol.scale,  # Invert y coordinate
                             content,
                             size,
                             layer
                         )
                         self.temp_component.append(text)
+                    elif cmd == 'pin':
+                        px, py, length, direction, name, layer = args
+                        pins = symbol.draw_pin(
+                            px + x/symbol.scale,
+                            py - y/symbol.scale,  # Invert y coordinate
+                            length,
+                            direction,
+                            name,
+                            layer
+                        )
+                        self.temp_component.extend(pins)
                 except Exception as e:
                     self.logger.error(f"Error drawing {cmd}: {str(e)}")
         else:

@@ -1,0 +1,1 @@
+Python based circuit calculator for engineering classes. Generate equations and solutions from electrical circuit diagrams.
