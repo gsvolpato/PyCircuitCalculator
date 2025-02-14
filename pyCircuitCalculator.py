@@ -9,21 +9,25 @@ class EagleSymbol:
         self.canvas = canvas
         self.scale = 20  # Scale factor to convert Eagle units to pixels
         self.rotation = 0  # Current rotation in degrees
+        self.symbol_color = "#8B0000"  # Dark red for both symbols and pins
+        self.offset_x = 0  # Add offset support
+        self.offset_y = 0
+        self.zoom = 1.0  # Add zoom factor
         
     def draw_wire(self, x1, y1, x2, y2, layer="94"):
         x1, y1 = self.rotate_point(x1, y1)
         x2, y2 = self.rotate_point(x2, y2)
         
-        canvas_x1 = x1 * self.scale
-        canvas_y1 = -y1 * self.scale
-        canvas_x2 = x2 * self.scale
-        canvas_y2 = -y2 * self.scale
+        canvas_x1 = x1 * self.scale * self.zoom + self.offset_x
+        canvas_y1 = -y1 * self.scale * self.zoom + self.offset_y
+        canvas_x2 = x2 * self.scale * self.zoom + self.offset_x
+        canvas_y2 = -y2 * self.scale * self.zoom + self.offset_y
         
         return self.canvas.create_line(
             canvas_x1, canvas_y1, 
             canvas_x2, canvas_y2,
             fill=self.get_layer_color(layer), 
-            width=2
+            width=2 * self.zoom  # Scale line width with zoom
         )
     
     def draw_circle(self, x, y, radius, layer="94"):
@@ -59,25 +63,46 @@ class EagleSymbol:
     
     def draw_text(self, x, y, text, size=1.0, layer="94", align="center"):
         x, y = self.rotate_point(x, y)
-        canvas_x = x * self.scale
-        canvas_y = -y * self.scale
         
-        font_size = int(size * 12)  # Convert Eagle text size to points
+        # Apply zoom and offset to coordinates
+        canvas_x = x * self.scale * self.zoom + self.offset_x
+        canvas_y = -y * self.scale * self.zoom + self.offset_y
+        
+        # Handle special text alignment for component labels
+        if text.startswith('>'):
+            # Move component values and names slightly above the component
+            canvas_y -= self.scale * 0.8 * self.zoom  # Scale offset with zoom
+            if text == '>VALUE':
+                canvas_y -= self.scale * 0.8 * self.zoom  # Scale offset with zoom
+        
+        # Scale font size with zoom
+        font_size = int(size * 12 * self.zoom)  # Scale font size with zoom
+        
+        # Map text anchors
+        anchor_map = {
+            "center": "center",
+            "start": "w",
+            "end": "e",
+            "left": "w",
+            "right": "e"
+        }
+        anchor = anchor_map.get(align, "center")
+        
         return self.canvas.create_text(
             canvas_x, canvas_y,
             text=text,
             fill=self.get_layer_color(layer),
             font=("Arial", font_size),
-            anchor=align
+            anchor=anchor
         )
     
-    def draw_pin(self, x, y, length, direction, name, layer="94"):
+    def draw_pin(self, x, y, length, direction, name, layer="91"):
         x, y = self.rotate_point(x, y)
         dx, dy = self.get_direction_vector(direction)
         
-        # Convert coordinates to strings for text concatenation
-        pin_x = str(x * self.scale)
-        pin_y = str(-y * self.scale)
+        # Adjust pin direction for pin 2
+        if name == "2":
+            dx = -dx  # Reverse direction for pin 2
         
         # Draw pin line
         pin = self.draw_wire(
@@ -86,13 +111,24 @@ class EagleSymbol:
             layer
         )
         
-        # Add pin name
+        # Calculate pin number position
+        number_offset = 0.3  # Offset in grid units
+        
+        # Position pin numbers consistently
+        if name == "2":
+            text_x = x + dx * length * 0.2  # Position number closer to the component
+        else:
+            text_x = x + dx * length * 0.2
+        text_y = y - number_offset  # Always place numbers above the pin
+        
+        # Add pin number
         text = self.draw_text(
-            x + dx * length * 1.2,
-            y + dy * length * 1.2,
-            str(name),  # Convert name to string
-            size=0.8,
-            layer=layer
+            text_x,
+            text_y,
+            str(name),
+            size=0.7,  # Slightly smaller pin numbers
+            layer=layer,
+            align="center"  # Center align all pin numbers
         )
         
         return [pin, text]
@@ -106,19 +142,42 @@ class EagleSymbol:
         return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
     
     def get_direction_vector(self, direction):
-        angle = math.radians((direction + self.rotation) % 360)
-        return (math.cos(angle), math.sin(angle))
+        # Convert direction to float and handle special cases
+        try:
+            if isinstance(direction, str):
+                # Map text directions to angles
+                direction_map = {
+                    'R': 0,    # Right
+                    'L': 180,  # Left
+                    'U': 90,   # Up
+                    'D': 270,  # Down
+                    'io': 0,   # Default to right for IO pins
+                    'in': 180, # Input pins come from left
+                    'out': 0,  # Output pins go to right
+                    '1': 0,    # Pin 1 goes right
+                    '2': 0,    # Pin 2 also goes right (changed from 180)
+                }
+                angle = direction_map.get(direction, 0)
+            else:
+                angle = float(direction)
+            
+            # Apply rotation and convert to radians
+            angle_rad = math.radians((angle + self.rotation) % 360)
+            return (math.cos(angle_rad), math.sin(angle_rad))
+        except (ValueError, TypeError):
+            # If conversion fails, default to rightward direction
+            return (1, 0)
     
     def get_layer_color(self, layer):
         colors = {
-            "91": "#404040",  # Pins
-            "94": "#000000",  # Symbols
+            "91": self.symbol_color,  # Pins - now using same dark red
+            "94": self.symbol_color,  # Symbols
             "95": "#808080",  # Names
             "96": "#404040",  # Values
             "97": "#FF0000",  # Info
             "98": "#0000FF",  # Guide
         }
-        return colors.get(layer, "#000000")
+        return colors.get(layer, self.symbol_color)
 
 class CircuitApp:
     def __init__(self):
@@ -132,6 +191,9 @@ class CircuitApp:
         
         self.root = tk.Tk()
         self.root.title("Circuit Calculator")
+        
+        # Initialize zoom before creating canvas and drawing grid
+        self.zoom = 1.0
         
         self.create_menu_bar()
         self.main_container = tk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -155,39 +217,183 @@ class CircuitApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close_application_window)
         self.root.bind('<Alt-F4>', self.close_application_hotkey)
         
+        # Add keyboard shortcuts
+        self.root.bind('<Control-n>', lambda e: self.menu_new())
+        self.root.bind('<Control-o>', lambda e: self.menu_open())
+        self.root.bind('<Control-s>', lambda e: self.menu_save())
+        self.root.bind('<Control-z>', lambda e: self.menu_undo())
+        self.root.bind('<Control-y>', lambda e: self.menu_redo())
+        self.root.bind('<Control-x>', lambda e: self.menu_cut())
+        self.root.bind('<Control-c>', lambda e: self.menu_copy())
+        self.root.bind('<Control-v>', lambda e: self.menu_paste())
+        self.root.bind('<Control-plus>', lambda e: self.menu_zoom_in())
+        self.root.bind('<Control-minus>', lambda e: self.menu_zoom_out())
+        self.root.bind('<Control-0>', lambda e: self.menu_zoom_reset())
+        self.root.bind('<Control-g>', self.toggle_grid)
+        self.root.bind('<Control-Shift-G>', self.toggle_snap)
+        
         # Force initial grid draw after window is fully initialized
         self.root.update_idletasks()  # Ensure geometry is updated
         self.draw_grid()
         
+        self.placed_components = []  # Track placed components
+        self.component_counters = {}  # Track component numbers
+        
+        # Add zoom bindings
+        self.canvas.bind("<MouseWheel>", self.on_mousewheel)  # Windows
+        self.canvas.bind("<Button-4>", self.on_mousewheel)    # Linux scroll up
+        self.canvas.bind("<Button-5>", self.on_mousewheel)    # Linux scroll down
+        
+        self.moving_component = None  # Track which component is being moved
+        
     def create_menu_bar(self):
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
+        # Create notebook for tabs
+        self.tab_control = ttk.Notebook(self.root)
+        self.tab_control.pack(fill=tk.X)
         
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="New", command=self.menu_new)
-        file_menu.add_command(label="Open", command=self.menu_open)
-        file_menu.add_command(label="Save", command=self.menu_save)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.menu_exit)
+        # Create tab frames
+        file_tab = ttk.Frame(self.tab_control)
+        edit_tab = ttk.Frame(self.tab_control)
+        view_tab = ttk.Frame(self.tab_control)
+        grid_tab = ttk.Frame(self.tab_control)  # New grid tab
         
-        # Edit menu
-        edit_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Edit", menu=edit_menu)
-        edit_menu.add_command(label="Undo", command=self.menu_undo)
-        edit_menu.add_command(label="Redo", command=self.menu_redo)
-        edit_menu.add_separator()
-        edit_menu.add_command(label="Cut", command=self.menu_cut)
-        edit_menu.add_command(label="Copy", command=self.menu_copy)
-        edit_menu.add_command(label="Paste", command=self.menu_paste)
+        # Add tabs to notebook
+        self.tab_control.add(file_tab, text='File')
+        self.tab_control.add(edit_tab, text='Edit')
+        self.tab_control.add(view_tab, text='View')
+        self.tab_control.add(grid_tab, text='Grid')  # Add grid tab
         
-        # View menu
-        view_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="View", menu=view_menu)
-        view_menu.add_command(label="Zoom In", command=self.menu_zoom_in)
-        view_menu.add_command(label="Zoom Out", command=self.menu_zoom_out)
-        view_menu.add_command(label="Reset Zoom", command=self.menu_zoom_reset)
+        # Style for toolbar buttons
+        style = ttk.Style()
+        style.configure(
+            'Toolbar.TButton',
+            padding=2,
+            relief='flat',
+            background='#f0f0f0'
+        )
+        
+        # File tab buttons
+        file_buttons = [
+            ("New", "📄", self.menu_new, "Ctrl+N"),
+            ("Open", "📂", self.menu_open, "Ctrl+O"),
+            ("Save", "💾", self.menu_save, "Ctrl+S"),
+        ]
+        
+        file_toolbar = ttk.Frame(file_tab)
+        file_toolbar.pack(fill=tk.X, padx=2, pady=2)
+        self.create_button_group(file_toolbar, "File", file_buttons)
+        
+        # Edit tab buttons
+        edit_buttons = [
+            ("Undo", "↩️", self.menu_undo, "Ctrl+Z"),
+            ("Redo", "↪️", self.menu_redo, "Ctrl+Y"),
+            None,  # Separator
+            ("Cut", "✂️", self.menu_cut, "Ctrl+X"),
+            ("Copy", "📋", self.menu_copy, "Ctrl+C"),
+            ("Paste", "📌", self.menu_paste, "Ctrl+V"),
+        ]
+        
+        edit_toolbar = ttk.Frame(edit_tab)
+        edit_toolbar.pack(fill=tk.X, padx=2, pady=2)
+        self.create_button_group(edit_toolbar, "Edit", edit_buttons)
+        
+        # View tab buttons
+        view_buttons = [
+            ("Zoom In", "🔍+", self.menu_zoom_in, "Ctrl++"),
+            ("Zoom Out", "🔍-", self.menu_zoom_out, "Ctrl+-"),
+            ("Reset View", "🔍1", self.menu_zoom_reset, "Ctrl+0"),
+        ]
+        
+        view_toolbar = ttk.Frame(view_tab)
+        view_toolbar.pack(fill=tk.X, padx=2, pady=2)
+        self.create_button_group(view_toolbar, "View", view_buttons)
+        
+        # Grid tab - horizontal layout
+        grid_toolbar = ttk.Frame(grid_tab)
+        grid_toolbar.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Show Grid checkbox
+        self.grid_visible_var = tk.BooleanVar(value=True)
+        show_grid_cb = ttk.Checkbutton(
+            grid_toolbar,
+            text="Show Grid",
+            variable=self.grid_visible_var,
+            command=self.toggle_grid
+        )
+        show_grid_cb.pack(side=tk.LEFT, padx=5)
+        
+        # Separator
+        ttk.Separator(grid_toolbar, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
+        
+        # Grid Style radio buttons in a labeled frame
+        style_frame = ttk.LabelFrame(grid_toolbar, text="Style")
+        style_frame.pack(side=tk.LEFT, padx=5)
+        
+        self.grid_style_var = tk.StringVar(value="lines")
+        ttk.Radiobutton(
+            style_frame,
+            text="Lines",
+            variable=self.grid_style_var,
+            value="lines",
+            command=self.update_grid_style
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Radiobutton(
+            style_frame,
+            text="Dots",
+            variable=self.grid_style_var,
+            value="dots",
+            command=self.update_grid_style
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Separator
+        ttk.Separator(grid_toolbar, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
+        
+        # Grid Size input
+        ttk.Label(grid_toolbar, text="Size:").pack(side=tk.LEFT, padx=(5, 0))
+        self.grid_size_var = tk.StringVar(value="20")
+        size_entry = ttk.Entry(
+            grid_toolbar,
+            textvariable=self.grid_size_var,
+            width=5
+        )
+        size_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Bind validation and update
+        size_entry.bind('<Return>', self.update_grid_size)
+        size_entry.bind('<FocusOut>', self.update_grid_size)
+        
+        # Snap to Grid checkbox
+        self.snap_grid_var = tk.BooleanVar(value=True)
+        snap_grid_cb = ttk.Checkbutton(
+            grid_toolbar,
+            text="Snap to Grid",
+            variable=self.snap_grid_var,
+            command=self.toggle_snap
+        )
+        snap_grid_cb.pack(side=tk.LEFT, padx=5)
+
+    def create_button_group(self, parent, group_name, buttons):
+        frame = ttk.LabelFrame(parent, text=group_name)
+        frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        for button_info in buttons:
+            if button_info is None:  # Separator
+                ttk.Separator(frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=2, pady=2)
+                continue
+            
+            name, icon, command, accelerator = button_info
+            btn = ttk.Button(
+                frame,
+                text=f"{icon}\n{name}",
+                command=command,
+                style='Toolbar.TButton',
+                width=8
+            )
+            btn.pack(side=tk.LEFT, padx=1, pady=1)
+            
+            # Create tooltip with keyboard shortcut
+            self.create_tooltip(btn, f"{name} ({accelerator})")
 
     def menu_new(self):
         self.logger.info("Menu: New")
@@ -258,8 +464,8 @@ class CircuitApp:
         
         # Tool icons/buttons configuration
         tools = [
-            ("select", "⬚", "Selection tool"),
-            ("move", "⬌", "Move components"),
+            ("select", "⬚", "Select"),
+            ("move", "⬌", "Move"),
             ("rotate", "⟳", "Rotate"),
             ("mirror", "⟷", "Mirror"),
             ("duplicate", "⎘", "Duplicate"),
@@ -267,12 +473,12 @@ class CircuitApp:
             ("add_part", "⊕", "Add Part"),
             ("replace", "↷", "Replace"),
             ("edit_part", "✎", "Edit Part"),
-            ("net", "⌇", "Add Net"),
-            ("junction", "●", "Add Junction"),
-            ("label", "T", "Add Label"),
-            ("name", "N", "Add Name"),
-            ("value", "V", "Add Value"),
-            ("split", "Y", "Split Wire")
+            ("net", "⌇", "Net"),
+            ("junction", "●", "Junction"),
+            ("label", "T", "Label"),
+            ("name", "N", "Name"),
+            ("value", "V", "Value"),
+            ("split", "Y", "Split")
         ]
         
         # Create tool buttons
@@ -320,20 +526,22 @@ class CircuitApp:
         widget.bind("<Enter>", show_tooltip)
         widget.bind("<Leave>", hide_tooltip)
     
-    def select_tool(self, tool_id):
-        self.logger.info(f"Selected tool: {tool_id}")
-        self.current_tool = tool_id
+    def select_tool(self, tool):
+        self.current_tool = tool
+        self.logger.info(f"Selected tool: {tool}")
         
         # Update button appearances
         for btn_id, btn in self.tool_buttons.items():
-            if btn_id == tool_id:
+            if btn_id == tool:
                 btn.config(bg="#e0e0e0")
             else:
                 btn.config(bg="white")
         
-        # Open parts window when add_part tool is selected
-        if tool_id == "add_part":
+        if tool == "add_part":
+            # Open parts window and bind events for component placement
             self.open_parts_window()
+            self.canvas.bind("<Motion>", self.update_component_position)
+            self.canvas.bind("<Button-1>", self.place_component)
 
     def open_parts_window(self):
         parts_window = tk.Toplevel(self.root)
@@ -454,46 +662,57 @@ class CircuitApp:
 
     def draw_grid(self):
         # Clear existing grid
-        for item in self.grid_items:
+        for item in getattr(self, 'grid_items', []):
             self.canvas.delete(item)
-        self.grid_items.clear()
+        self.grid_items = []
         
-        # Get canvas dimensions
-        width = self.canvas.winfo_width()
-        height = self.canvas.winfo_height()
-        
-        if width <= 1 or height <= 1:  # Canvas not ready yet
-            self.canvas.after(100, self.draw_grid)
+        if not self.grid_visible_var.get():
             return
         
-        # Get visible area with scroll offset
+        # Convert grid size to int first, then multiply by zoom
+        base_grid_size = int(self.grid_size_var.get())
+        grid_size = int(base_grid_size * self.zoom)  # Scale grid with zoom
+        
+        # Get visible area
         visible_left = self.canvas.canvasx(0)
         visible_top = self.canvas.canvasy(0)
-        visible_right = self.canvas.canvasx(width)
-        visible_bottom = self.canvas.canvasy(height)
+        visible_right = self.canvas.canvasx(self.canvas.winfo_width())
+        visible_bottom = self.canvas.canvasy(self.canvas.winfo_height())
         
         # Extend grid area
-        left = int(visible_left - 100)
-        top = int(visible_top - 100)
-        right = int(visible_right + 100)
-        bottom = int(visible_bottom + 100)
+        left = int(visible_left - grid_size * 5)
+        top = int(visible_top - grid_size * 5)
+        right = int(visible_right + grid_size * 5)
+        bottom = int(visible_bottom + grid_size * 5)
         
-        # Grid spacing
-        spacing = 20
+        # Ensure grid starts at multiples of grid_size
+        start_x = (left // grid_size) * grid_size
+        start_y = (top // grid_size) * grid_size
         
-        # Ensure grid starts at multiples of spacing
-        start_x = (left // spacing) * spacing
-        start_y = (top // spacing) * spacing
-        
-        # Draw vertical lines
-        for x in range(start_x, right + spacing, spacing):
-            line = self.canvas.create_line(x, top, x, bottom, fill='#E0E0E0')
-            self.grid_items.append(line)
-        
-        # Draw horizontal lines
-        for y in range(start_y, bottom + spacing, spacing):
-            line = self.canvas.create_line(left, y, right, y, fill='#E0E0E0')
-            self.grid_items.append(line)
+        # Draw grid lines or dots
+        if self.grid_style_var.get() == "lines":
+            for x in range(start_x, right + grid_size, grid_size):
+                line = self.canvas.create_line(x, top, x, bottom, 
+                                             fill='#e0e0e0', 
+                                             width=max(1, 0.5 * self.zoom))
+                self.grid_items.append(line)
+            
+            for y in range(start_y, bottom + grid_size, grid_size):
+                line = self.canvas.create_line(left, y, right, y, 
+                                             fill='#e0e0e0', 
+                                             width=max(1, 0.5 * self.zoom))
+                self.grid_items.append(line)
+        else:  # dots
+            dot_size = max(1, self.zoom)
+            for x in range(start_x, right + grid_size, grid_size):
+                for y in range(start_y, bottom + grid_size, grid_size):
+                    dot = self.canvas.create_oval(
+                        x - dot_size, y - dot_size,
+                        x + dot_size, y + dot_size,
+                        fill='#e0e0e0',
+                        outline='#e0e0e0'
+                    )
+                    self.grid_items.append(dot)
 
     def drag_canvas(self, event):
         if self.canvas_drag:
@@ -503,12 +722,12 @@ class CircuitApp:
             
             # Move all canvas objects
             self.canvas.scan_dragto(event.x, event.y, gain=1)
-            self.canvas.scan_mark(self.last_x, self.last_y)
             
+            # Update last position
             self.last_x = event.x
             self.last_y = event.y
             
-            # Redraw grid after drag
+            # Update grid based on new canvas position
             self.draw_grid()
             
             self.logger.debug(f"Canvas dragged by ({dx}, {dy})")
@@ -527,77 +746,45 @@ class CircuitApp:
         return self.component_counters[component_type]
 
     def create_temp_component(self, x, y):
-        if self.temp_component:
-            for item in self.temp_component:
-                self.canvas.delete(item)
-        
-        symbol = EagleSymbol(self.canvas)
+        # Clear any existing temporary component
+        for item in self.temp_component:
+            self.canvas.delete(item)
         self.temp_component = []
         
+        # Create new temporary component
         if self.current_component in self.symbols:
             # Snap to grid
-            x = round(x / 20) * 20
-            y = round(y / 20) * 20
+            grid_size = int(self.grid_size_var.get())
+            x = round(x / grid_size) * grid_size
+            y = round(y / grid_size) * grid_size
             
             symbol_data = self.symbols[self.current_component]
+            symbol = EagleSymbol(self.canvas)
             
-            for cmd, *args in symbol_data:
-                try:
-                    # Skip SPICEMODEL and SPICEEXTRA
-                    if cmd == 'text':
-                        tx, ty, size, content, layer = args
-                        if content in ['>SPICEMODEL', '>SPICEEXTRA']:
-                            continue
-                        # Keep >NAME and >VALUE as is for preview
-                        text = symbol.draw_text(
-                            tx + x/symbol.scale,
-                            ty - y/symbol.scale,
-                            content,
-                            size,
-                            layer
-                        )
-                        self.temp_component.append(text)
-                    elif cmd == 'wire':
-                        x1, y1, x2, y2, layer = args
-                        line = symbol.draw_wire(
-                            x1 + x/symbol.scale,
-                            y1 - y/symbol.scale,
-                            x2 + x/symbol.scale,
-                            y2 - y/symbol.scale,
-                            layer
-                        )
-                        self.temp_component.append(line)
-                    elif cmd == 'circle':
-                        cx, cy, radius, layer = args
-                        symbol.draw_circle(
-                            cx + x/symbol.scale,
-                            cy + y/symbol.scale,
-                            radius,
-                            layer
-                        )
-                    elif cmd == 'arc':
-                        x1, y1, x2, y2, curve, layer = args
-                        symbol.draw_arc(
-                            x1 + x/symbol.scale,
-                            y1 + y/symbol.scale,
-                            abs(x2-x1)/2,  # radius
-                            0,  # start angle
-                            curve,  # end angle
-                            layer
-                        )
-                    elif cmd == 'pin':
-                        px, py, length, direction, name, layer = args
-                        pins = symbol.draw_pin(
-                            px + x/symbol.scale,
-                            py - y/symbol.scale,  # Invert y coordinate
-                            length,
-                            direction,
-                            name,
-                            layer
-                        )
-                        self.temp_component.extend(pins)
-                except Exception as e:
-                    self.logger.error(f"Error drawing {cmd}: {str(e)}")
+            # Set zoom and offset for the symbol
+            symbol.zoom = self.zoom
+            symbol.offset_x = x
+            symbol.offset_y = y
+            
+            # Draw each element of the symbol
+            for element in symbol_data:
+                element_type = element[0]
+                if element_type == 'wire':
+                    x1, y1, x2, y2, layer = element[1:6]
+                    item = symbol.draw_wire(x1, y1, x2, y2, layer)
+                    self.temp_component.append(item)
+                elif element_type == 'circle':
+                    cx, cy, radius, layer = element[1:5]
+                    item = symbol.draw_circle(cx, cy, radius, layer)
+                    self.temp_component.append(item)
+                elif element_type == 'pin':
+                    px, py, length, direction, name, layer = element[1:7]
+                    items = symbol.draw_pin(px, py, length, direction, name, layer)
+                    self.temp_component.extend(items)
+                elif element_type == 'text':
+                    tx, ty, size, text, layer = element[1:6]
+                    item = symbol.draw_text(tx, ty, text, size, layer)
+                    self.temp_component.append(item)
         else:
             self.logger.warning(f"Symbol {self.current_component} not found in library")
 
@@ -607,33 +794,100 @@ class CircuitApp:
             self.mouse_x = event.x
             self.mouse_y = event.y
             
-            # Calculate offset from grid
-            grid_size = 20
-            x = round(event.x / grid_size) * grid_size
-            y = round(event.y / grid_size) * grid_size
-            
-            # Delete old temporary component
-            for item in self.temp_component:
-                self.canvas.delete(item)
-            
             # Create new temporary component at new position
-            self.create_temp_component(x, y)
+            self.create_temp_component(event.x, event.y)
             
-            self.logger.debug(f"Component position: ({x}, {y})")
+            self.logger.debug(f"Component position: ({event.x}, {event.y})")
 
     def place_component(self, event):
         if self.current_component and self.temp_component:
-            x, y = event.x, event.y
-            self.logger.info(f"Placed {self.current_component} at ({x}, {y})")
+            # Get the next component number
+            base_name = self.current_component
+            count = self.component_counters.get(base_name, 0) + 1
+            self.component_counters[base_name] = count
+            
+            # Snap to grid
+            grid_size = int(self.grid_size_var.get())
+            x = round(event.x / grid_size) * grid_size
+            y = round(event.y / grid_size) * grid_size
+            
             # Create permanent component
-            self.add_component(x, y)
-            # Clean up temp component
-            for item in self.temp_component:
-                self.canvas.delete(item)
-            self.temp_component = None
+            self.create_temp_component(x, y)
+            
+            # Add to placed components list with origin
+            component = {
+                'type': base_name,
+                'name': f"{base_name}{count}",
+                'items': self.temp_component.copy(),
+                'x': x,
+                'y': y,
+                'origin_x': 0,  # Local origin
+                'origin_y': 0
+            }
+            self.placed_components.append(component)
+            
+            # Add click handlers for movement
+            for item in component['items']:
+                self.canvas.tag_bind(item, '<Button-1>', 
+                    lambda e, c=component: self.start_component_move(e, c))
+                self.canvas.tag_bind(item, '<B1-Motion>', 
+                    lambda e, c=component: self.move_component(e, c))
+                self.canvas.tag_bind(item, '<ButtonRelease-1>', 
+                    lambda e, c=component: self.stop_component_move(e, c))
+            
+            # Clear temporary component references but don't delete the items
+            self.temp_component = []
             self.current_component = None
             self.canvas.unbind("<Motion>")
-            self.canvas.unbind("<Button-1>")
+            
+            self.logger.info(f"Placed {base_name} at ({x}, {y})")
+
+    def start_component_move(self, event, component):
+        if self.current_tool == "select":
+            self.moving_component = component
+            self.last_x = event.x
+            self.last_y = event.y
+            self.logger.debug(f"Started moving component {component['name']}")
+
+    def move_component(self, event, component):
+        if self.current_tool == "select" and self.moving_component == component:
+            # Calculate movement delta
+            dx = event.x - self.last_x
+            dy = event.y - self.last_y
+            
+            # Update component position
+            component['x'] += dx
+            component['y'] += dy
+            
+            # Move all items in the component
+            for item in component['items']:
+                self.canvas.move(item, dx, dy)
+            
+            # Update last position
+            self.last_x = event.x
+            self.last_y = event.y
+            
+            self.logger.debug(f"Moving component {component['name']} by ({dx}, {dy})")
+
+    def stop_component_move(self, event, component):
+        if self.current_tool == "select" and self.moving_component == component:
+            # Snap final position to grid if enabled
+            if self.snap_grid_var.get():
+                grid_size = int(self.grid_size_var.get())
+                new_x = round(component['x'] / grid_size) * grid_size
+                new_y = round(component['y'] / grid_size) * grid_size
+                
+                # Move to final snapped position
+                dx = new_x - component['x']
+                dy = new_y - component['y']
+                for item in component['items']:
+                    self.canvas.move(item, dx, dy)
+                
+                component['x'] = new_x
+                component['y'] = new_y
+            
+            self.moving_component = None
+            self.logger.debug(f"Stopped moving component {component['name']}")
 
     def add_resistor(self, x, y):
         self.add_component(x, y)
@@ -788,6 +1042,35 @@ class CircuitApp:
                     layer = "91"  # Standard pin layer
                     symbol_data.append(('pin', x, y, length, direction, name, layer))
                 
+                if symbol_name == "C":
+                    symbol_data = [
+                        # Main capacitor plates (vertical lines)
+                        ('wire', -1.27, -2, -1.27, 0, "94"),  # Left plate (vertical)
+                        ('wire', 1.27, 0, 1.27, 2, "94"),     # Right plate (vertical)
+                        # Connection pins
+                        ('pin', -5.08, 0, 3, "R", "1", "91"),  # Left pin
+                        ('pin', 5.08, 0, 3, "L", "2", "91"),   # Right pin
+                        # Value and name labels
+                        ('text', 0, -3.81, 1.27, '>VALUE', "96"),  # Value above
+                        ('text', 0, 2.54, 1.27, '>NAME', "95"),    # Name below
+                    ]
+                
+                if symbol_name == "AMMETER":
+                    symbol_data = [
+                        # Circle
+                        ('circle', 0, 0, 2.54, "94"),  # Main circle
+                        # Arrow
+                        ('wire', 0, -1.27, 0, 1.27, "94"),    # Vertical line
+                        ('wire', -0.635, 0.635, 0, 1.27, "94"),  # Left diagonal (shorter)
+                        ('wire', 0.635, 0.635, 0, 1.27, "94"),   # Right diagonal (shorter)
+                        # Pins
+                        ('pin', 0, -2.54, 2, "D", "1", "91"),  # Top pin (shorter)
+                        ('pin', 0, 2.54, 2, "U", "2", "91"),   # Bottom pin (shorter)
+                        # Labels
+                        ('text', 2.54, 0, 1.27, '>NAME', "95"),
+                        ('text', 2.54, 2.54, 1.27, '>VALUE', "96")
+                    ]
+                
                 self.symbols[symbol_name] = symbol_data
                 symbol_count += 1
             
@@ -806,6 +1089,87 @@ class CircuitApp:
         self.last_x = event.x
         self.last_y = event.y
         self.logger.debug("Started canvas drag")
+
+    def toggle_grid(self, event=None):
+        self.grid_visible = self.grid_visible_var.get()
+        self.logger.info(f"Grid visibility: {self.grid_visible}")
+        self.draw_grid()
+
+    def toggle_snap(self, event=None):
+        self.snap_to_grid = self.snap_grid_var.get()
+        self.logger.info(f"Snap to grid: {self.snap_to_grid}")
+
+    def update_grid_style(self, event=None):
+        self.logger.info(f"Grid style changed to: {self.grid_style_var.get()}")
+        self.draw_grid()
+
+    def update_grid_size(self, event=None):
+        try:
+            new_size = int(self.grid_size_var.get())
+            if new_size < 5:
+                new_size = 5
+            elif new_size > 100:
+                new_size = 100
+            self.grid_size_var.set(str(new_size))
+            self.logger.info(f"Changed grid size to: {new_size}")
+            self.draw_grid()
+        except ValueError:
+            self.grid_size_var.set("20")  # Reset to default if invalid input
+
+    def on_mousewheel(self, event):
+        # Get the mouse position
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        
+        # Determine zoom direction
+        if event.num == 5 or event.delta < 0:  # Scroll down
+            factor = 0.9
+        else:  # Scroll up
+            factor = 1.1
+        
+        # Update zoom
+        old_zoom = self.zoom
+        self.zoom *= factor
+        
+        # Constrain zoom level
+        if self.zoom < 0.1:
+            self.zoom = 0.1
+        elif self.zoom > 5.0:
+            self.zoom = 5.0
+        
+        # Adjust all components scale
+        for component in self.placed_components:
+            for item in component['items']:
+                # Get current coordinates
+                coords = self.canvas.coords(item)
+                if coords:  # Check if item still exists
+                    # Scale coordinates around mouse position
+                    new_coords = []
+                    for i in range(0, len(coords), 2):
+                        cx = coords[i]
+                        cy = coords[i + 1]
+                        # Calculate new position relative to mouse
+                        dx = cx - x
+                        dy = cy - y
+                        new_coords.append(x + dx * (self.zoom / old_zoom))
+                        new_coords.append(y + dy * (self.zoom / old_zoom))
+                    # Update item position
+                    self.canvas.coords(item, *new_coords)
+                    
+                    # Scale line width for wires
+                    if self.canvas.type(item) == "line":
+                        self.canvas.itemconfig(item, width=2 * self.zoom)
+                    elif self.canvas.type(item) == "text":
+                        # Scale font size
+                        current_font = self.canvas.itemcget(item, "font")
+                        font_name = current_font.split()[0]
+                        base_size = 12  # Base font size
+                        new_size = int(base_size * self.zoom)
+                        self.canvas.itemconfig(item, font=(font_name, new_size))
+        
+        # Redraw grid with new zoom level
+        self.draw_grid()
+        self.logger.info(f"Zoom level: {self.zoom:.2f}")
 
     def run(self):
         try:
