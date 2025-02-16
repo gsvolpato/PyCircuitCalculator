@@ -32,15 +32,15 @@ class EagleSymbol:
     
     def draw_circle(self, x, y, radius, layer="94"):
         x, y = self.rotate_point(x, y)
-        canvas_x = x * self.scale
-        canvas_y = -y * self.scale
-        r = radius * self.scale
+        canvas_x = x * self.scale * self.zoom + self.offset_x
+        canvas_y = -y * self.scale * self.zoom + self.offset_y  # Invert y coordinate
+        r = radius * self.scale * self.zoom  # Apply zoom to radius too
         
         return self.canvas.create_oval(
             canvas_x - r, canvas_y - r,
             canvas_x + r, canvas_y + r,
             outline=self.get_layer_color(layer),
-            width=2
+            width=2 * self.zoom  # Scale line width with zoom
         )
     
     def draw_arc(self, x, y, radius, start_angle, end_angle, layer="94"):
@@ -61,7 +61,7 @@ class EagleSymbol:
             style="arc", width=2
         )
     
-    def draw_text(self, x, y, text, size=1.0, layer="94", align="center"):
+    def draw_text(self, x, y, text, size=1.0, layer="94", align="center", tags=()):
         x, y = self.rotate_point(x, y)
         
         # Apply zoom and offset to coordinates
@@ -93,7 +93,8 @@ class EagleSymbol:
             text=text,
             fill=self.get_layer_color(layer),
             font=("Arial", font_size),
-            anchor=anchor
+            anchor=anchor,
+            tags=tags  # Add tags parameter
         )
     
     def draw_pin(self, x, y, length, direction, name, layer="91"):
@@ -179,6 +180,33 @@ class EagleSymbol:
         }
         return colors.get(layer, self.symbol_color)
 
+    def draw_origin_markers(self, x, y, is_text=False):
+        """Draw origin marker cross"""
+        # Increase cross size (was 3)
+        size = 5 * self.zoom  # Bigger cross size
+        color = "#808080" if is_text else self.symbol_color
+        
+        # Convert coordinates
+        canvas_x = x * self.scale * self.zoom + self.offset_x
+        canvas_y = -y * self.scale * self.zoom + self.offset_y
+        
+        # Draw the cross
+        markers = []
+        # Horizontal line
+        markers.append(self.canvas.create_line(
+            canvas_x - size, canvas_y,
+            canvas_x + size, canvas_y,
+            fill=color, width=1.5 * self.zoom  # Slightly thicker lines
+        ))
+        # Vertical line
+        markers.append(self.canvas.create_line(
+            canvas_x, canvas_y - size,
+            canvas_x, canvas_y + size,
+            fill=color, width=1.5 * self.zoom  # Slightly thicker lines
+        ))
+        
+        return markers
+
 class CircuitApp:
     def __init__(self):
         # Setup logging
@@ -232,6 +260,10 @@ class CircuitApp:
         self.root.bind('<Control-g>', self.toggle_grid)
         self.root.bind('<Control-Shift-G>', self.toggle_snap)
         
+        # Add keyboard bindings for delete
+        self.root.bind('<Delete>', self.delete_selected)
+        self.root.bind('<BackSpace>', self.delete_selected)
+        
         # Force initial grid draw after window is fully initialized
         self.root.update_idletasks()  # Ensure geometry is updated
         self.draw_grid()
@@ -245,6 +277,18 @@ class CircuitApp:
         self.canvas.bind("<Button-5>", self.on_mousewheel)    # Linux scroll down
         
         self.moving_component = None  # Track which component is being moved
+        
+        # Add selection variables
+        self.selection_start_x = None
+        self.selection_start_y = None
+        self.selection_rectangle = None
+        self.selected_components = []
+        self.is_selecting = False
+        
+        # Bind mouse events for selection
+        self.canvas.bind('<ButtonPress-1>', self.start_selection)
+        self.canvas.bind('<B1-Motion>', self.update_selection)
+        self.canvas.bind('<ButtonRelease-1>', self.end_selection)
         
     def create_menu_bar(self):
         # Create notebook for tabs
@@ -457,7 +501,7 @@ class CircuitApp:
             self.logger.info("Application closed by window X or Alt-F4")
         self.logger.info("Application closing")
         self.root.quit()
-
+        
     def create_sidebar(self):
         self.sidebar_frame = tk.Frame(self.main_container, width=80, bg='white')
         self.main_container.add(self.sidebar_frame)
@@ -537,9 +581,16 @@ class CircuitApp:
             else:
                 btn.config(bg="white")
         
-        if tool == "add_part":
+        if tool == "delete":
+            # Enable delete mode
+            self.canvas.bind("<Button-1>", self.handle_delete_click)
+            # Unbind other tool events
+            self.canvas.unbind("<Motion>")
+            self.canvas.unbind("<B1-Motion>")
+        elif tool == "add_part":
             # Open parts window and bind events for component placement
             self.open_parts_window()
+            self.canvas.unbind("<Button-1>")
             self.canvas.bind("<Motion>", self.update_component_position)
             self.canvas.bind("<Button-1>", self.place_component)
 
@@ -624,7 +675,7 @@ class CircuitApp:
         self.canvas.bind("<Button-1>", self.place_component)
         # Create initial preview
         self.create_temp_component(self.mouse_x, self.mouse_y)
-
+                
     def create_canvas(self):
         self.canvas_frame = tk.Frame(self.main_container)
         self.main_container.add(self.canvas_frame)
@@ -659,7 +710,7 @@ class CircuitApp:
     def on_canvas_configure(self, event=None):
         # Canvas size changed - redraw grid
         self.draw_grid()
-
+        
     def draw_grid(self):
         # Clear existing grid
         for item in getattr(self, 'grid_items', []):
@@ -747,44 +798,70 @@ class CircuitApp:
 
     def create_temp_component(self, x, y):
         # Clear any existing temporary component
-        for item in self.temp_component:
-            self.canvas.delete(item)
-        self.temp_component = []
+        if isinstance(self.temp_component, dict):
+            for items in self.temp_component.values():
+                for item in items:
+                    self.canvas.delete(item)
+        elif isinstance(self.temp_component, list):
+            for item in self.temp_component:
+                self.canvas.delete(item)
+        self.temp_component = {}
         
         # Create new temporary component
         if self.current_component in self.symbols:
             # Snap to grid
-            grid_size = int(self.grid_size_var.get())
+            grid_size = 20
             x = round(x / grid_size) * grid_size
             y = round(y / grid_size) * grid_size
             
             symbol_data = self.symbols[self.current_component]
             symbol = EagleSymbol(self.canvas)
             
-            # Set zoom and offset for the symbol
-            symbol.zoom = self.zoom
+            # Set position offset
             symbol.offset_x = x
             symbol.offset_y = y
             
-            # Draw each element of the symbol
+            # Track different parts of the component
+            symbol_items = []  # Main symbol elements (wires, circles, pins)
+            name_items = []   # Name text and origin
+            value_items = []  # Value text and origin
+            
+            # Add symbol origin marker first
+            origin_markers = symbol.draw_origin_markers(0, 0)
+            symbol_items.extend(origin_markers)
+            
             for element in symbol_data:
                 element_type = element[0]
-                if element_type == 'wire':
-                    x1, y1, x2, y2, layer = element[1:6]
-                    item = symbol.draw_wire(x1, y1, x2, y2, layer)
-                    self.temp_component.append(item)
-                elif element_type == 'circle':
-                    cx, cy, radius, layer = element[1:5]
-                    item = symbol.draw_circle(cx, cy, radius, layer)
-                    self.temp_component.append(item)
-                elif element_type == 'pin':
-                    px, py, length, direction, name, layer = element[1:7]
-                    items = symbol.draw_pin(px, py, length, direction, name, layer)
-                    self.temp_component.extend(items)
-                elif element_type == 'text':
+                if element_type == 'text':
                     tx, ty, size, text, layer = element[1:6]
-                    item = symbol.draw_text(tx, ty, text, size, layer)
-                    self.temp_component.append(item)
+                    if text not in ['>SPICEMODEL', '>SPICEEXTRA']:
+                        # Create text and its origin marker
+                        if text == '>NAME':
+                            text_item = symbol.draw_text(tx, ty, text, size, layer, tags=('name',))
+                            origin_markers = symbol.draw_origin_markers(tx, ty, is_text=True)
+                            name_items.extend([text_item] + origin_markers)
+                        elif text == '>VALUE':
+                            text_item = symbol.draw_text(tx, ty, text, size, layer, tags=('value',))
+                            origin_markers = symbol.draw_origin_markers(tx, ty, is_text=True)
+                            value_items.extend([text_item] + origin_markers)
+                else:
+                    # Add other elements to symbol items
+                    if element_type == 'wire':
+                        item = symbol.draw_wire(*element[1:6])
+                        symbol_items.append(item)
+                    elif element_type == 'circle':
+                        item = symbol.draw_circle(*element[1:5])
+                        symbol_items.append(item)
+                    elif element_type == 'pin':
+                        items = symbol.draw_pin(*element[1:7])
+                        symbol_items.extend(items)
+            
+            # Store all items in temp_component dictionary
+            self.temp_component = {
+                'symbol': symbol_items,
+                'name': name_items,
+                'value': value_items
+            }
         else:
             self.logger.warning(f"Symbol {self.current_component} not found in library")
 
@@ -814,26 +891,25 @@ class CircuitApp:
             # Create permanent component
             self.create_temp_component(x, y)
             
-            # Add to placed components list with origin
-            component = {
+            # Store component with separate parts
+            component_data = {
+                'symbol': self.temp_component['symbol'],
+                'name': self.temp_component['name'],
+                'value': self.temp_component['value'],
                 'type': base_name,
-                'name': f"{base_name}{count}",
-                'items': self.temp_component.copy(),
-                'x': x,
-                'y': y,
-                'origin_x': 0,  # Local origin
-                'origin_y': 0
+                'name_text': f"{base_name}{count}",
+                'origin': (x, y)
             }
-            self.placed_components.append(component)
+            self.placed_components.append(component_data)
             
             # Add click handlers for movement
-            for item in component['items']:
+            for item in component_data['symbol']:
                 self.canvas.tag_bind(item, '<Button-1>', 
-                    lambda e, c=component: self.start_component_move(e, c))
+                    lambda e, c=component_data: self.start_component_move(e, c))
                 self.canvas.tag_bind(item, '<B1-Motion>', 
-                    lambda e, c=component: self.move_component(e, c))
+                    lambda e, c=component_data: self.move_component(e, c))
                 self.canvas.tag_bind(item, '<ButtonRelease-1>', 
-                    lambda e, c=component: self.stop_component_move(e, c))
+                    lambda e, c=component_data: self.stop_component_move(e, c))
             
             # Clear temporary component references but don't delete the items
             self.temp_component = []
@@ -847,7 +923,7 @@ class CircuitApp:
             self.moving_component = component
             self.last_x = event.x
             self.last_y = event.y
-            self.logger.debug(f"Started moving component {component['name']}")
+            self.logger.debug(f"Started moving component {component['name_text']}")
 
     def move_component(self, event, component):
         if self.current_tool == "select" and self.moving_component == component:
@@ -856,38 +932,36 @@ class CircuitApp:
             dy = event.y - self.last_y
             
             # Update component position
-            component['x'] += dx
-            component['y'] += dy
+            component['origin'] = (component['origin'][0] + dx, component['origin'][1] + dy)
             
             # Move all items in the component
-            for item in component['items']:
+            for item in component['symbol']:
                 self.canvas.move(item, dx, dy)
             
             # Update last position
             self.last_x = event.x
             self.last_y = event.y
             
-            self.logger.debug(f"Moving component {component['name']} by ({dx}, {dy})")
+            self.logger.debug(f"Moving component {component['name_text']} by ({dx}, {dy})")
 
     def stop_component_move(self, event, component):
         if self.current_tool == "select" and self.moving_component == component:
             # Snap final position to grid if enabled
             if self.snap_grid_var.get():
                 grid_size = int(self.grid_size_var.get())
-                new_x = round(component['x'] / grid_size) * grid_size
-                new_y = round(component['y'] / grid_size) * grid_size
+                new_x = round(component['origin'][0] / grid_size) * grid_size
+                new_y = round(component['origin'][1] / grid_size) * grid_size
                 
                 # Move to final snapped position
-                dx = new_x - component['x']
-                dy = new_y - component['y']
-                for item in component['items']:
+                dx = new_x - component['origin'][0]
+                dy = new_y - component['origin'][1]
+                for item in component['symbol']:
                     self.canvas.move(item, dx, dy)
                 
-                component['x'] = new_x
-                component['y'] = new_y
+                component['origin'] = (new_x, new_y)
             
             self.moving_component = None
-            self.logger.debug(f"Stopped moving component {component['name']}")
+            self.logger.debug(f"Stopped moving component {component['name_text']}")
 
     def add_resistor(self, x, y):
         self.add_component(x, y)
@@ -973,6 +1047,17 @@ class CircuitApp:
                         )
                 except Exception as e:
                     self.logger.error(f"Error drawing {cmd}: {str(e)}")
+            
+            # Store component with separate parts
+            component_data = {
+                'symbol': symbol_items,
+                'name': name_items,
+                'value': value_items,
+                'type': self.current_component,
+                'name_text': auto_name,  # Store actual name text
+                'origin': (x, y)
+            }
+            self.placed_components.append(component_data)
         else:
             self.logger.warning(f"Symbol {self.current_component} not found in library")
 
@@ -1061,14 +1146,14 @@ class CircuitApp:
                         ('circle', 0, 0, 2.54, "94"),  # Main circle
                         # Arrow
                         ('wire', 0, -1.27, 0, 1.27, "94"),    # Vertical line
-                        ('wire', -0.635, 0.635, 0, 1.27, "94"),  # Left diagonal (shorter)
-                        ('wire', 0.635, 0.635, 0, 1.27, "94"),   # Right diagonal (shorter)
+                        ('wire', -0.635, 0.635, 0, 1.27, "94"),  # Left diagonal
+                        ('wire', 0.635, 0.635, 0, 1.27, "94"),   # Right diagonal
                         # Pins
-                        ('pin', 0, -2.54, 2, "D", "1", "91"),  # Top pin (shorter)
-                        ('pin', 0, 2.54, 2, "U", "2", "91"),   # Bottom pin (shorter)
-                        # Labels
-                        ('text', 2.54, 0, 1.27, '>NAME', "95"),
-                        ('text', 2.54, 2.54, 1.27, '>VALUE', "96")
+                        ('pin', 0, -2.54, 2, "D", "1", "91"),  # Top pin
+                        ('pin', 0, 2.54, 2, "U", "2", "91"),   # Bottom pin
+                        # Labels with adjusted positions
+                        ('text', 3.81, 0, 1.27, '>NAME', "95"),    # Name to the right
+                        ('text', 3.81, 2.54, 1.27, '>VALUE', "96") # Value above name
                     ]
                 
                 self.symbols[symbol_name] = symbol_data
@@ -1139,7 +1224,7 @@ class CircuitApp:
         
         # Adjust all components scale
         for component in self.placed_components:
-            for item in component['items']:
+            for item in component['symbol']:
                 # Get current coordinates
                 coords = self.canvas.coords(item)
                 if coords:  # Check if item still exists
@@ -1171,6 +1256,130 @@ class CircuitApp:
         self.draw_grid()
         self.logger.info(f"Zoom level: {self.zoom:.2f}")
 
+    def start_selection(self, event):
+        # Convert screen coordinates to canvas coordinates
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        # Get items at click position with smaller overlap area
+        clicked_items = self.canvas.find_overlapping(
+            canvas_x-1, canvas_y-1, 
+            canvas_x+1, canvas_y+1
+        )
+        
+        # Filter out selection rectangle from clicked items
+        clicked_items = [item for item in clicked_items 
+                        if item != self.selection_rectangle]
+        
+        if not clicked_items:
+            # Clear any existing selection rectangle
+            if self.selection_rectangle:
+                self.canvas.delete(self.selection_rectangle)
+            
+            self.is_selecting = True
+            self.selection_start_x = canvas_x
+            self.selection_start_y = canvas_y
+            
+            # Create new selection rectangle
+            self.selection_rectangle = self.canvas.create_rectangle(
+                canvas_x, canvas_y,
+                canvas_x, canvas_y,
+                outline='#0078D7',
+                dash=(2, 2),
+                fill='#0078D7',
+                stipple='gray25',
+                width=1
+            )
+            
+            # Clear previous selection if not holding shift
+            if not event.state & 0x1:  # Check if shift is not pressed
+                self.selected_components = []
+            
+            self.logger.debug(f"Started selection at ({canvas_x}, {canvas_y})")
+
+    def update_selection(self, event):
+        if self.is_selecting and self.selection_rectangle:
+            current_x = self.canvas.canvasx(event.x)
+            current_y = self.canvas.canvasy(event.y)
+            
+            self.canvas.coords(
+                self.selection_rectangle,
+                self.selection_start_x, self.selection_start_y,
+                current_x, current_y
+            )
+            
+            self.logger.debug(f"Updated selection to ({current_x}, {current_y})")
+
+    def end_selection(self, event):
+        if self.is_selecting and self.selection_rectangle:
+            coords = self.canvas.coords(self.selection_rectangle)
+            x1, y1, x2, y2 = coords
+            
+            # Normalize coordinates
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
+            
+            # Find components in selection area
+            newly_selected = []
+            for component in self.placed_components:
+                origin = component['origin']
+                if (x1 <= origin[0] <= x2 and y1 <= origin[1] <= y2):
+                    if component not in self.selected_components:
+                        newly_selected.append(component)
+            
+            # Add newly selected components
+            self.selected_components.extend(newly_selected)
+            
+            # Highlight all selected components
+            self.highlight_selected_components()
+            
+            # Clean up selection
+            self.canvas.delete(self.selection_rectangle)
+            self.selection_rectangle = None
+            self.selection_start_x = None
+            self.selection_start_y = None
+            self.is_selecting = False
+            
+            self.logger.info(f"Selection ended, {len(newly_selected)} new components selected")
+
+    def highlight_selected_components(self):
+        # Remove previous highlights
+        for component in self.placed_components:
+            for item in component['symbol']:
+                self.canvas.itemconfig(item, width=2 * self.zoom)
+        
+        # Highlight selected components
+        for component in self.selected_components:
+            for item in component['symbol']:
+                # Make selected items thicker
+                self.canvas.itemconfig(item, width=3 * self.zoom)
+
+    def delete_selected(self, event=None):
+        if not self.selected_components:
+            return
+        
+        # Store number of components being deleted for logging
+        num_deleted = len(self.selected_components)
+        
+        # Delete each selected component
+        for component in self.selected_components:
+            # Delete all canvas items for this component
+            for item in component['symbol']:
+                self.canvas.delete(item)
+            # Remove from placed components list
+            self.placed_components.remove(component)
+            
+            # Decrement component counter if it was the last one
+            component_type = component['type']
+            component_number = int(component['name_text'][len(component_type):])
+            if component_number == self.component_counters.get(component_type, 0):
+                self.component_counters[component_type] = component_number - 1
+        
+        # Clear selection
+        self.selected_components = []
+        
+        self.logger.info(f"Deleted {num_deleted} component{'s' if num_deleted > 1 else ''}")
+            
     def run(self):
         try:
             self.root.geometry("1200x800")
@@ -1179,6 +1388,58 @@ class CircuitApp:
             self.logger.error(f"Application error: {str(e)}")
         finally:
             self.logger.info("Application terminated")
+
+    def handle_delete_click(self, event):
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        
+        items = self.canvas.find_overlapping(x-1, y-1, x+1, y+1)
+        
+        if not items:
+            return
+            
+        for component in self.placed_components:
+            # Check which part was clicked
+            clicked_symbol = set(items) & set(component['symbol'])
+            clicked_name = set(items) & set(component['name'])
+            clicked_value = set(items) & set(component['value'])
+            
+            if clicked_symbol:
+                # Delete entire component if clicking symbol origin
+                clicked_item = list(clicked_symbol)[0]
+                item_type = self.canvas.type(clicked_item)
+                
+                is_origin = (item_type == 'line' and 
+                           any(self.canvas.type(other) == 'line' 
+                               for other in clicked_symbol))
+                
+                if is_origin:
+                    # Delete everything
+                    for items in component.values():
+                        for item in items:
+                            self.canvas.delete(item)
+                    self.placed_components.remove(component)
+                    # Update counter
+                    component_type = component['type']
+                    component_number = int(component['name_text'][len(component_type):])
+                    if component_number == self.component_counters.get(component_type, 0):
+                        self.component_counters[component_type] = component_number - 1
+                    self.logger.info(f"Deleted component {component['name_text']}")
+                break
+                
+            elif clicked_name:
+                # Hide name if clicking name text or origin
+                for item in component['name']:
+                    self.canvas.itemconfig(item, state='hidden')
+                self.logger.info(f"Hidden name for component {component['name_text']}")
+                break
+                
+            elif clicked_value:
+                # Hide value if clicking value text or origin
+                for item in component['value']:
+                    self.canvas.itemconfig(item, state='hidden')
+                self.logger.info(f"Hidden value for component {component['name_text']}")
+                break
 
 if __name__ == "__main__":
     app = CircuitApp()
